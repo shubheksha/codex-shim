@@ -133,14 +133,53 @@ class ModelSettings:
 
 
 def _model_rows(data: Any) -> list[dict[str, Any]]:
-    if not isinstance(data, dict):
+    if isinstance(data, list):
+        rows = data
+    elif isinstance(data, dict):
+        rows = data.get("models")
+        if rows is None:
+            rows = data.get("customModels")
+        if rows is None:
+            rows = data.get("launchModels", data.get("launch_models", []))
+    else:
         return []
-    rows = data.get("models")
-    if rows is None:
-        rows = data.get("customModels", [])
     if not isinstance(rows, list):
         return []
-    return [row for row in rows if isinstance(row, dict)]
+    return [row for row in (_coerce_model_row(row) for row in rows) if row is not None]
+
+
+def _coerce_model_row(row: Any) -> dict[str, Any] | None:
+    if isinstance(row, str):
+        return {
+            "model": row,
+            "display_name": row,
+            "provider": "generic-chat-completion-api",
+            "base_url": "http://127.0.0.1:11434/v1",
+        }
+    if isinstance(row, dict):
+        return _normalize_model_row(row)
+    return None
+
+
+def _normalize_model_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    if "display_name" not in normalized and "name" in normalized:
+        normalized["display_name"] = normalized["name"]
+    if "base_url" not in normalized and "baseURL" in normalized:
+        normalized["base_url"] = normalized["baseURL"]
+    if "api_key" not in normalized and "apiKey" not in normalized and "bearerToken" in normalized:
+        normalized["api_key"] = normalized["bearerToken"]
+    if _looks_like_ollama_row(normalized):
+        normalized["provider"] = "generic-chat-completion-api"
+        if not _field(normalized, "base_url", "baseUrl", "baseURL"):
+            normalized["base_url"] = "http://127.0.0.1:11434/v1"
+    return normalized
+
+
+def _looks_like_ollama_row(row: dict[str, Any]) -> bool:
+    provider = str(row.get("provider") or "").lower()
+    base_url = str(_field(row, "base_url", "baseUrl", "baseURL", default="")).lower()
+    return provider == "ollama" or "11434" in base_url or "ollama" in base_url
 
 
 def _field(row: dict[str, Any], *keys: str, default: Any = None) -> Any:

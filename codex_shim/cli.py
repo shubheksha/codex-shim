@@ -269,16 +269,29 @@ def exec_codex(settings_path: Path, port: int, codex_args: list[str]) -> None:
     if codex_args[:1] == ["--"]:
         codex_args = codex_args[1:]
     args = ["codex", *overrides, *codex_args]
+    env = _with_loopback_no_proxy(os.environ.copy())
     if os.name == "nt":
-        raise SystemExit(subprocess.call(args))
-    os.execvp("codex", args)
+        raise SystemExit(subprocess.call(args, env=env))
+    os.execvpe("codex", args, env)
 
 
 def exec_codex_app(settings_path: Path, port: int, path: str) -> None:
     _quit_codex_app()
     args = ["codex", "app", path]
-    subprocess.Popen(args)
+    subprocess.Popen(args, env=_with_loopback_no_proxy(os.environ.copy()))
     _foreground_codex_app()
+
+
+def _with_loopback_no_proxy(env: dict[str, str]) -> dict[str, str]:
+    loopback = ["127.0.0.1", "localhost", "::1"]
+    for key in ("NO_PROXY", "no_proxy"):
+        values = [part.strip() for part in env.get(key, "").split(",") if part.strip()]
+        lower_values = {value.lower() for value in values}
+        for host in loopback:
+            if host.lower() not in lower_values:
+                values.append(host)
+        env[key] = ",".join(values)
+    return env
 
 
 def _quit_codex_app() -> None:
@@ -291,6 +304,9 @@ def _quit_codex_app() -> None:
 
 
 def patch_codex_app() -> int:
+    if sys.platform != "darwin":
+        print("patch-app is macOS-only; Windows MSIX Codex Desktop cannot be patched with this ASAR helper.", file=sys.stderr)
+        return 1
     app_asar = Path("/Applications/Codex.app/Contents/Resources/app.asar")
     backup = RUNTIME_DIR / "app.asar.before-codex-shim-model-picker-patch"
     workdir = RUNTIME_DIR / "app-asar-work"
@@ -343,6 +359,9 @@ def patch_codex_app() -> int:
 
 
 def restore_codex_app_bundle() -> int:
+    if sys.platform != "darwin":
+        print("restore-app is macOS-only; Windows MSIX Codex Desktop cannot be restored with this ASAR helper.", file=sys.stderr)
+        return 1
     app_asar = Path("/Applications/Codex.app/Contents/Resources/app.asar")
     backup = RUNTIME_DIR / "app.asar.before-codex-shim-model-picker-patch"
     if not backup.exists():

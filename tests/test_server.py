@@ -6,7 +6,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from codex_shim.server import ShimServer
+from codex_shim.server import ShimServer, _sanitize_chatgpt_passthrough_body
+from codex_shim.translate import SHIM_ENCRYPTED_CONTENT_PREFIX
 
 
 @pytest.fixture
@@ -20,6 +21,59 @@ def auth_present(monkeypatch, tmp_path):
 @pytest.fixture
 def auth_missing(monkeypatch, tmp_path):
     monkeypatch.setattr("codex_shim.settings.DEFAULT_CODEX_AUTH", tmp_path / "missing-auth.json")
+
+
+def test_sanitize_chatgpt_passthrough_body_drops_shim_reasoning():
+    body = {
+        "model": "claude-local",
+        "input": [
+            {"type": "message", "role": "user", "content": "hi"},
+            {
+                "id": "rs_shim",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "local thought"}],
+                "encrypted_content": f"{SHIM_ENCRYPTED_CONTENT_PREFIX}deadbeef",
+            },
+            {
+                "id": "rs_openai",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "openai thought"}],
+                "encrypted_content": "openai-verifiable-content",
+            },
+        ],
+    }
+
+    sanitized = _sanitize_chatgpt_passthrough_body(body)
+
+    assert sanitized is not body
+    assert sanitized["input"] is not body["input"]
+    assert [item["id"] for item in sanitized["input"] if item.get("type") == "reasoning"] == ["rs_openai"]
+    assert sanitized["input"][1]["encrypted_content"] == "openai-verifiable-content"
+    assert len(body["input"]) == 3
+
+
+def test_sanitize_chatgpt_passthrough_body_removes_nested_shim_encrypted_content():
+    body = {
+        "model": "claude-local",
+        "input": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "done",
+                        "encrypted_content": f"{SHIM_ENCRYPTED_CONTENT_PREFIX}deadbeef",
+                    }
+                ],
+            }
+        ],
+    }
+
+    sanitized = _sanitize_chatgpt_passthrough_body(body)
+
+    assert "encrypted_content" not in sanitized["input"][0]["content"][0]
+    assert "encrypted_content" in body["input"][0]["content"][0]
 
 
 async def test_responses_routes_to_openai_chat(tmp_path):

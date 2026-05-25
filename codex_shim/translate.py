@@ -7,7 +7,8 @@ from typing import Any
 
 THINK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 
-_THINKING_MAGIC = "anthropic-thinking-v1:"
+SHIM_ENCRYPTED_CONTENT_PREFIX = "anthropic-thinking-v1:"
+_THINKING_MAGIC = SHIM_ENCRYPTED_CONTENT_PREFIX
 
 
 def _decode_thinking_blob(encoded: Any) -> dict[str, Any] | None:

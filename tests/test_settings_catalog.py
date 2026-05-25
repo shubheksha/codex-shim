@@ -57,6 +57,31 @@ def test_legacy_custom_models_schema_still_loads(tmp_path):
     assert model.base_url == "http://x/v1"
 
 
+def test_ollama_launch_models_schema_loads(tmp_path):
+    settings = tmp_path / "ollama-launch-models.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "launchModels": [
+                    "llama3.2",
+                    {"model": "qwen2.5-coder:14b", "name": "Qwen Coder", "provider": "ollama"},
+                    {"model": "deepseek-r1", "baseURL": "http://localhost:11434/v1"},
+                ]
+            }
+        )
+    )
+
+    models = ModelSettings(settings).load()
+
+    assert [model.slug for model in models] == ["llama3-2", "qwen2-5-coder-14b", "deepseek-r1"]
+    assert [model.provider for model in models] == ["generic-chat-completion-api"] * 3
+    assert [model.base_url for model in models] == [
+        "http://127.0.0.1:11434/v1",
+        "http://127.0.0.1:11434/v1",
+        "http://localhost:11434/v1",
+    ]
+
+
 def test_catalog_preserves_context_and_visibility():
     model = ModelSettingsFixture.one()
     entry = catalog_entry(model)
@@ -146,6 +171,52 @@ def test_managed_config_escapes_windows_catalog_path(monkeypatch):
     top_block, _ = cli._managed_config_blocks("vendor\\model", 8765)
     assert 'model = "vendor\\\\model"' in top_block
     assert 'model_catalog_json = "C:\\\\Users\\\\User\\\\codex-shim\\\\.codex-shim\\\\custom_model_catalog.json"' in top_block
+
+
+def test_install_codex_config_is_idempotent(monkeypatch, tmp_path):
+    settings = tmp_path / "models.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"model": "llama3.2", "display_name": "Llama", "provider": "generic-chat-completion-api", "base_url": "http://127.0.0.1:11434/v1"}
+                ]
+            }
+        )
+    )
+    config_path = tmp_path / ".codex" / "config.toml"
+    monkeypatch.setattr(cli, "RUNTIME_DIR", tmp_path / ".codex-shim")
+    monkeypatch.setattr(cli, "CODEX_CONFIG_PATH", config_path)
+    monkeypatch.setattr(cli, "CODEX_CONFIG_BACKUP_PATH", tmp_path / ".codex-shim" / "config.toml.before-codex-shim")
+
+    cli.install_codex_config(settings, 8765, "llama3.2")
+    cli.install_codex_config(settings, 8765, "llama3.2")
+
+    text = config_path.read_text()
+    assert text.count("[model_providers.codex_shim]") == 1
+    assert text.count("model_provider = \"codex_shim\"") == 1
+    assert text.count("model_catalog_json") == 1
+
+
+def test_loopback_no_proxy_adds_upper_and_lowercase_entries():
+    env = cli._with_loopback_no_proxy({"NO_PROXY": "example.com,localhost"})
+
+    assert env["NO_PROXY"] == "example.com,localhost,127.0.0.1,::1"
+    assert env["no_proxy"] == "127.0.0.1,localhost,::1"
+
+
+def test_patch_app_fails_off_macos(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+
+    assert cli.patch_codex_app() == 1
+    assert "macOS-only" in capsys.readouterr().err
+
+
+def test_restore_app_fails_off_macos(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+
+    assert cli.restore_codex_app_bundle() == 1
+    assert "macOS-only" in capsys.readouterr().err
 
 
 class ModelSettingsFixture:

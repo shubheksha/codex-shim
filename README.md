@@ -93,6 +93,9 @@ ln -sf "$PWD/bin/codex-app" ~/.local/bin/codex-app
 ln -sf "$PWD/bin/codex-model" ~/.local/bin/codex-model
 ```
 
+If you move the checkout, recreate those symlinks; `codex-shim app` launches
+`codex app` through the installed Python entry point and does not need them.
+
 Alternative on macOS/Linux/WSL/Git Bash (no install, run straight from the
 checkout):
 
@@ -182,6 +185,24 @@ Path behavior is intentionally ordinary:
 The optional macOS picker patch is not required for the shim server to work. On
 Windows, if Codex can read the generated catalog/provider config, requests route
 through the same local endpoint as every other platform.
+
+Windows Store/MSIX Codex Desktop builds are stricter than the CLI. They may treat
+custom local/BYOK slugs as unavailable, rewrite `model = "<custom-slug>"` back to
+`gpt-5.5`, and add `[tui.model_availability_nux]` entries on launch. That is a
+Desktop allowlist behavior, not a shim routing behavior: `codex exec`, the TUI,
+and the shim endpoint still use the configured model slug. The macOS `patch-app`
+helper does not apply to MSIX packages under `C:\\Program Files\\WindowsApps`.
+
+If Windows has a system proxy such as Clash/V2Ray, make sure loopback bypasses it:
+
+```powershell
+setx NO_PROXY "127.0.0.1,localhost,::1"
+setx no_proxy "127.0.0.1,localhost,::1"
+```
+
+`codex-shim codex -- ...` and `codex-shim app ...` add those loopback entries to
+the launched process environment automatically; set them globally too if you run
+`codex.exe` directly.
 
 ---
 
@@ -322,6 +343,43 @@ Useful model fields:
 | `max_output_tokens` | Default max output when translating to Anthropic. |
 | `no_image_support` | When true, catalog advertises text-only input. |
 | `extra_headers` | Optional upstream headers merged into requests. |
+
+### Ollama / local OpenAI-compatible chat endpoints
+
+Codex sends the Responses API. Ollama and many local servers expose
+OpenAI-shaped `/v1/chat/completions` instead. Keep Codex pointed at the shim with
+`wire_api = "responses"`; configure Ollama as `generic-chat-completion-api` so
+the shim translates Responses ⇄ chat completions:
+
+```json
+{
+  "models": [
+    {
+      "model": "llama3.2",
+      "display_name": "Ollama Llama 3.2",
+      "provider": "generic-chat-completion-api",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key": "ollama"
+    }
+  ]
+}
+```
+
+`codex-shim --settings /path/to/ollama-launch-models.json generate` also accepts
+launch-model style files with a top-level `launchModels` / `launch_models` array,
+including bare strings. `provider: "ollama"` is normalized to
+`generic-chat-completion-api` with `http://127.0.0.1:11434/v1` when no base URL
+is supplied.
+
+Repeated `codex-shim enable`, `codex-shim app`, and `codex-shim model use ...`
+runs are idempotent: the shim-managed top-level keys and
+`[model_providers.codex_shim]` block are removed before the new managed block is
+written, so duplicate profile/provider keys should not accumulate.
+
+Codex may make small background calls to OpenAI model slugs such as
+`gpt-5.4-mini` for its own product behavior. Those calls are not Ollama routing
+failures; use the shim request log to confirm the actual selected model for the
+agent turn.
 
 ---
 
@@ -652,8 +710,8 @@ Global flags:
 - `--settings <path>`: used by catalog/model/start/app/codex flows.
 - `--port <port>`: used by daemon/provider flows.
 
-`patch-app` and `restore-app` always target `/Applications/Codex.app` and do not
-use `--settings`.
+`patch-app` and `restore-app` always target `/Applications/Codex.app`, do not
+use `--settings`, and exit with a clear error on Windows/Linux.
 
 ---
 
@@ -738,7 +796,24 @@ codex-shim model list
 ```
 
 If the catalog contains your models but Desktop still hides them, apply the
-macOS picker patch.
+macOS picker patch. On Windows Store/MSIX Desktop, the same allowlist can rewrite
+the active model back to `gpt-5.5`; use `codex-shim codex -- ...` / Codex CLI for
+BYOK routes, or a non-MSIX/Desktop build that can read the custom catalog without
+rewriting the config.
+
+### Windows proxy sends loopback traffic away from the shim
+
+If `codex.exe` returns proxy/502 errors while the shim is healthy, a system proxy
+may be intercepting `http://127.0.0.1:8765`. Set both uppercase and lowercase
+bypass variables before launching Codex:
+
+```powershell
+$env:NO_PROXY = "127.0.0.1,localhost,::1"
+$env:no_proxy = "127.0.0.1,localhost,::1"
+```
+
+`codex-shim app ...` and `codex-shim codex -- ...` set those entries for the
+child process automatically.
 
 ### Model appears but requests 404
 

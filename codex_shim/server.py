@@ -18,6 +18,7 @@ from .settings import (
     chatgpt_passthrough_available,
 )
 from .translate import (
+    SHIM_ENCRYPTED_CONTENT_PREFIX,
     anthropic_to_chat_response,
     anthropic_to_response,
     chat_completion_to_response,
@@ -104,7 +105,7 @@ class ShimServer:
         account_id = tokens.get("account_id") or ""
         if not access_token:
             raise web.HTTPUnauthorized(text="auth.json has no access_token")
-        forwarded = dict(body)
+        forwarded = _sanitize_chatgpt_passthrough_body(body)
         forwarded["model"] = "gpt-5.5"
         headers = {
             "Authorization": f"Bearer {access_token}",
@@ -246,6 +247,41 @@ class ShimServer:
         except Exception:
             pass
         return response
+
+
+_DROP_ITEM = object()
+
+
+def _sanitize_chatgpt_passthrough_body(body: dict[str, Any]) -> dict[str, Any]:
+    sanitized = _sanitize_chatgpt_passthrough_value(body)
+    return sanitized if isinstance(sanitized, dict) else {}
+
+
+def _sanitize_chatgpt_passthrough_value(value: Any) -> Any:
+    if isinstance(value, list):
+        output = []
+        for item in value:
+            sanitized = _sanitize_chatgpt_passthrough_value(item)
+            if sanitized is not _DROP_ITEM:
+                output.append(sanitized)
+        return output
+    if isinstance(value, dict):
+        if value.get("type") == "reasoning" and _has_shim_encrypted_content(value):
+            return _DROP_ITEM
+        output = {}
+        for key, item in value.items():
+            if key == "encrypted_content" and isinstance(item, str) and item.startswith(SHIM_ENCRYPTED_CONTENT_PREFIX):
+                continue
+            sanitized = _sanitize_chatgpt_passthrough_value(item)
+            if sanitized is not _DROP_ITEM:
+                output[key] = sanitized
+        return output
+    return value
+
+
+def _has_shim_encrypted_content(value: dict[str, Any]) -> bool:
+    encrypted_content = value.get("encrypted_content")
+    return isinstance(encrypted_content, str) and encrypted_content.startswith(SHIM_ENCRYPTED_CONTENT_PREFIX)
 
 
 class ResponsesStreamState:
