@@ -44,6 +44,7 @@ def responses_to_chat(body: dict[str, Any], upstream_model: str) -> dict[str, An
             m["reasoning_content"] = pending_reasoning
             pending_reasoning = None
         messages.append(m)
+    messages = _sanitize_chat_messages(_merge_consecutive_messages(_normalize_chat_roles(messages)))
 
     chat: dict[str, Any] = {
         "model": upstream_model,
@@ -428,3 +429,89 @@ def _jsonish(value: Any) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, separators=(",", ":"))
+
+
+def _sanitize_string(value: str) -> str:
+    value = value.replace("\x00", "")
+    return "".join(char for char in value if char in "\n\r\t" or ord(char) >= 0x20)
+
+
+def _sanitize_chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cleaned = []
+    for message in messages:
+        current = dict(message)
+        current.pop("_reasoning_only", None)
+        current.pop("encrypted_content", None)
+        current.pop("summary", None)
+        role = current.get("role", "user")
+        content = current.get("content")
+        if role != "assistant":
+            if content is None:
+                current["content"] = ""
+            elif not isinstance(content, str):
+                current["content"] = _content_to_text(content)
+            current["content"] = _sanitize_string(current["content"])
+        elif content is not None:
+            if not isinstance(content, str):
+                content = _content_to_text(content)
+            current["content"] = _sanitize_string(content)
+
+        if isinstance(current.get("reasoning_content"), str):
+            current["reasoning_content"] = _sanitize_string(current["reasoning_content"])
+        tool_calls = current.get("tool_calls")
+        if tool_calls:
+            copied_calls = []
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                copied_call = dict(call)
+                if isinstance(copied_call.get("id"), str):
+                    copied_call["id"] = _sanitize_string(copied_call["id"])
+                function = copied_call.get("function")
+                if isinstance(function, dict):
+                    function = dict(function)
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        function["arguments"] = _sanitize_string(arguments)
+                    copied_call["function"] = function
+                copied_calls.append(copied_call)
+            current["tool_calls"] = copied_calls
+        tool_call_id = current.get("tool_call_id")
+        if isinstance(tool_call_id, str):
+            current["tool_call_id"] = _sanitize_string(tool_call_id)
+        cleaned.append(current)
+    return cleaned
+
+
+def _normalize_chat_roles(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    for message in messages:
+        current = dict(message)
+        if current.get("role") == "developer":
+            current["role"] = "system"
+        normalized.append(current)
+    return normalized
+
+
+def _merge_consecutive_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    for message in messages:
+        current = dict(message)
+        role = current.get("role")
+        if merged and role == merged[-1].get("role") and role in {"system", "user", "assistant"}:
+            previous = merged[-1]
+            previous_content = previous.get("content") or ""
+            current_content = current.get("content") or ""
+            if previous_content and current_content:
+                previous["content"] = f"{previous_content}\n\n{current_content}"
+            elif current_content:
+                previous["content"] = current_content
+            if role == "assistant":
+                if current.get("reasoning_content") and not previous.get("reasoning_content"):
+                    previous["reasoning_content"] = current["reasoning_content"]
+                tool_calls = list(previous.get("tool_calls") or []) + list(current.get("tool_calls") or [])
+                if tool_calls:
+                    previous["tool_calls"] = tool_calls
+            continue
+        merged.append(current)
+    return merged

@@ -34,6 +34,33 @@ def test_responses_to_chat_preserves_reasoning_and_effort_for_deepseek():
     ]
 
 
+def test_responses_to_chat_sanitizes_and_merges_strict_provider_messages():
+    body = {
+        "model": "slug",
+        "instructions": "System\x00one",
+        "input": [
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "rules\x00two"}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi\x00"}]},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "again\x01"}]},
+            {"type": "function_call", "call_id": "call\x000", "name": "tool", "arguments": "{\"x\":\"y\x00\"}"},
+        ],
+    }
+
+    out = responses_to_chat(body, "kimi-k2")
+
+    assert out["messages"] == [
+        {"role": "system", "content": "Systemone\n\nrulestwo"},
+        {"role": "user", "content": "hi\n\nagain"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "call0", "type": "function", "function": {"name": "tool", "arguments": "{\"x\":\"y\"}"}}
+            ],
+        },
+    ]
+
+
 def test_responses_function_tools_convert_to_chat_shape():
     body = {
         "model": "slug",
