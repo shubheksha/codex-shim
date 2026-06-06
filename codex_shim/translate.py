@@ -197,12 +197,13 @@ def anthropic_to_chat_response(payload: dict[str, Any], requested_model: str) ->
         if block.get("type") == "text":
             content += block.get("text", "")
         elif block.get("type") == "tool_use":
+            raw_name = block.get("name", "")
             tool_calls.append(
                 {
                     "id": block.get("id"),
                     "type": "function",
                     "function": {
-                        "name": block.get("name", ""),
+                        "name": raw_name,
                         "arguments": _jsonish(block.get("input", {})),
                     },
                 }
@@ -246,16 +247,33 @@ def chat_completion_to_response(payload: dict[str, Any], requested_model: str) -
         )
     for call in message.get("tool_calls") or []:
         fn = call.get("function") or {}
-        output.append(
-            {
-                "id": call.get("id", "call_0"),
-                "type": "function_call",
-                "status": "completed",
-                "call_id": call.get("id", "call_0"),
-                "name": fn.get("name", ""),
-                "arguments": fn.get("arguments", ""),
-            }
-        )
+        raw_name = fn.get("name", "")
+        # Split dot-notated namespace if present (e.g. multi_agent_v1.spawn_agent)
+        name_parts = raw_name.split(".", 1)
+        if len(name_parts) == 2:
+            namespace, tool_name = name_parts
+            output.append(
+                {
+                    "id": call.get("id", "call_0"),
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": call.get("id", "call_0"),
+                    "namespace": namespace,
+                    "name": tool_name,
+                    "arguments": fn.get("arguments", ""),
+                }
+            )
+        else:
+            output.append(
+                {
+                    "id": call.get("id", "call_0"),
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": call.get("id", "call_0"),
+                    "name": raw_name,
+                    "arguments": fn.get("arguments", ""),
+                }
+            )
     return {
         "id": payload.get("id", "resp_chat"),
         "object": "response",
@@ -384,12 +402,18 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
             # message with multiple tool_calls so chat-completions upstreams
             # accept the subsequent tool messages.
             call_id = item.get("call_id") or item.get("id") or "call_0"
+            raw_name = item.get("name") or ""
+            namespace = item.get("namespace")
+            if namespace:
+                call_name = f"{namespace}.{raw_name}"
+            else:
+                call_name = raw_name
             pending_tool_calls.append(
                 {
                     "id": call_id,
                     "type": "function",
                     "function": {
-                        "name": item.get("name") or "",
+                        "name": call_name,
                         "arguments": item.get("arguments") or "",
                     },
                 }
@@ -571,9 +595,29 @@ def _responses_tools_to_chat_tools(tools: Any) -> list[dict[str, Any]]:
         return []
     converted = []
     for tool in tools:
-        function_tool = _responses_tool_to_chat_function(tool)
-        if function_tool:
-            converted.append(function_tool)
+        if isinstance(tool, dict) and tool.get("type") == "namespace":
+            namespace = str(tool.get("name") or "")
+            desc = str(tool.get("description") or f"Tools in the {namespace} namespace.")
+            for sub_tool in tool.get("tools") or []:
+                if not isinstance(sub_tool, dict):
+                    continue
+                if sub_tool.get("type") != "function":
+                    continue
+                sub_name = str(sub_tool.get("name") or "")
+                if not sub_name:
+                    continue
+                converted.append({
+                    "type": "function",
+                    "function": {
+                        "name": f"{namespace}.{sub_name}",
+                        "description": sub_tool.get("description") or desc,
+                        "parameters": sub_tool.get("parameters") or {"type": "object", "properties": {}},
+                    },
+                })
+        else:
+            function_tool = _responses_tool_to_chat_function(tool)
+            if function_tool:
+                converted.append(function_tool)
     return converted
 
 
