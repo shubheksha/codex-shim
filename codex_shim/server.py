@@ -960,12 +960,7 @@ class ResponsesStreamState:
         if state is None:
             call_id = call.get("id") or f"call_{index}"
             raw_name = fn.get("name") or ""
-            name_parts = raw_name.split(".", 1)
-            if len(name_parts) == 2:
-                namespace, tool_name = name_parts
-                state = await self._open_tool(response, key=index, call_id=call_id, name=tool_name, namespace=namespace)
-            else:
-                state = await self._open_tool(response, key=index, call_id=call_id, name=raw_name)
+            state = await self._open_tool(response, key=index, call_id=call_id, name=raw_name)
         else:
             if fn.get("name"):
                 state["name"] += fn["name"]
@@ -1001,24 +996,12 @@ class ResponsesStreamState:
                 if seed:
                     await self._text_delta(response, seed)
             elif btype == "tool_use":
-                raw_name = block.get("name") or ""
-                name_parts = raw_name.split(".", 1)
-                if len(name_parts) == 2:
-                    ns, tn = name_parts
-                    await self._open_tool(
-                        response,
-                        key=("anthropic", idx),
-                        call_id=block.get("id") or f"call_{idx}",
-                        name=tn,
-                        namespace=ns,
-                    )
-                else:
-                    await self._open_tool(
-                        response,
-                        key=("anthropic", idx),
-                        call_id=block.get("id") or f"call_{idx}",
-                        name=raw_name,
-                    )
+                await self._open_tool(
+                    response,
+                    key=("anthropic", idx),
+                    call_id=block.get("id") or f"call_{idx}",
+                    name=block.get("name") or "",
+                )
             elif btype in {"thinking", "redacted_thinking"}:
                 await self._open_reasoning(
                     response,
@@ -1178,7 +1161,7 @@ class ResponsesStreamState:
             },
         )
 
-    async def _open_tool(self, response: web.StreamResponse, *, key: Any, call_id: str, name: str, namespace: str | None = None) -> dict[str, Any]:
+    async def _open_tool(self, response: web.StreamResponse, *, key: Any, call_id: str, name: str) -> dict[str, Any]:
         # Close the assistant message before opening tool items, matching the
         # OpenAI Responses-API ordering Codex expects.
         if self.message_opened and not self.message_closed:
@@ -1189,28 +1172,24 @@ class ResponsesStreamState:
             "id": call_id,
             "call_id": call_id,
             "name": name,
-            "namespace": namespace,
             "arguments": "",
             "output_index": output_index,
             "closed": False,
         }
         self.tool_calls[key] = state
-        item: dict[str, Any] = {
-            "id": call_id,
-            "type": "function_call",
-            "status": "in_progress",
-            "call_id": call_id,
-            "name": name,
-            "arguments": "",
-        }
-        if namespace:
-            item["namespace"] = namespace
         await _write_sse(
             response,
             {
                 "type": "response.output_item.added",
                 "output_index": output_index,
-                "item": item,
+                "item": {
+                    "id": call_id,
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": "",
+                },
             },
         )
         return state
@@ -1348,16 +1327,25 @@ class ResponsesStreamState:
         }
 
     def _tool_item(self, state: dict[str, Any], status: str) -> dict[str, Any]:
+        # Namespace may arrive split across multiple streaming deltas,
+        # so always derive it from the accumulated name at render time.
+        raw_name = state["name"]
+        name_parts = raw_name.split(".", 1)
+        if len(name_parts) == 2:
+            namespace, tool_name = name_parts
+        else:
+            namespace = None
+            tool_name = raw_name
         item: dict[str, Any] = {
             "id": state["id"],
             "type": "function_call",
             "status": status,
             "call_id": state["call_id"],
-            "name": state["name"],
+            "name": tool_name,
             "arguments": state["arguments"],
         }
-        if state.get("namespace"):
-            item["namespace"] = state["namespace"]
+        if namespace:
+            item["namespace"] = namespace
         return item
 
     def _response(self, status: str, *, final: bool = False) -> dict[str, Any]:
